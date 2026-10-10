@@ -1,0 +1,17 @@
+{
+  "name": "SmolVLM2-2.2B-Instruct Q4_K_M with FP16 projector",
+  "architecture": "smolvlm2",
+  "license": "Apache-2.0",
+  "qualification": "Kernel-team recommended initial NPU candidate; no Admiral hardware qualification yet",
+  "repository_revision": "1bc3c9f74ceafd4c8d4411cc9cf188bba3798f91",
+  "model": {
+    "path": "/models/model.gguf",
+    "sha256": "0cf76814555b8665149075b74ab6b5c1d428ea1d3d01c1918c12012e8d7c9f58",
+    "source": "https://huggingface.co/ggml-org/SmolVLM2-2.2B-Instruct-GGUF/resolve/1bc3c9f74ceafd4c8d4411cc9cf188bba3798f91/SmolVLM2-2.2B-Instruct-Q4_K_M.gguf"
+  },
+  "projector": {
+    "path": "/models/mmproj.gguf",
+    "sha256": "db9a3a1648cab1ebc3af4a2b0c8145dd8faebf6f7dd7b16e7dc1842229f14ac4",
+    "source": "https://huggingface.co/ggml-org/SmolVLM2-2.2B-Instruct-GGUF/resolve/1bc3c9f74ceafd4c8d4411cc9cf188bba3798f91/mmproj-SmolVLM2-2.2B-Instruct-f16.gguf"
+  }
+}

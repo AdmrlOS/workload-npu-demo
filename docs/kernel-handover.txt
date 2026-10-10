@@ -1,0 +1,734 @@
+gment check. |
+| Host/application boundary | Generated host package selection excludes llama.cpp, Mesa, Vulkan loader, FFmpeg, and libv4l application packages. |
+| Source archive checks | Linux 7.2.9 and U-Boot 2025.10 hashes checked; Linux hash provided for kernel and toolchain-header packages. |
+| Kernel configuration | Kernel gate passed: 323 fragment symbols and 27 required built-ins at the time of validation. |
+| Driver compilation | Panthor, Rocket, UVC, and Rockchip video-decoder **driver objects** compiled for ARM64 using the available cross-compiler. |
+| Device tree | Upstream Orange Pi 5 DTB compiled; GPU, NPU cores, and NPU IOMMU enablement checked. |
+| Boot configuration | U-Boot defconfig/fragment merge and redundant environment settings checked. |
+| Boot hooks | Shared boot script generation, fixture bootloader/rootfs staging, genimage template substitution, and shell syntax checked. |
+
+### 2.3 Not yet established
+
+- A complete Buildroot build of the flashable image.
+- A successful boot of that image on the physical Orange Pi 5.
+- Final module linking, signing, installation, and loading as part of a completed image.
+- Actual camera, GPU, or NPU operation from an Admiral workload container.
+- End-to-end vision-model correctness, NPU offload, performance, power consumption, or sustained stability.
+- Compatibility or benefit of the third-party Rocket patch series on this exact kernel and board.
+
+**Do not treat a configuration pass, compiled object, or visible device node as an inference-performance result.**
+
+## 3. Kernel, board, and boot contract
+
+### 3.1 Kernel source and device tree
+
+The configured kernel source is:
+
+```text
+https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.9.tar.xz
+SHA-256: b4c5dfbe51a364a6c7f03869200f88c8e1f77403539005f14b7fc6bc91b8d8ba
+```
+
+
+The kernel is based on the upstream ARM64 defconfig plus Admiral's common, architecture, SoC, board, and generated signing fragments. `CONFIG_LOCALVERSION="-admiral"` is selected; record the actual `uname -r` from a built image rather than assuming a final release string.
+
+The source is upstream stable, with Admiral configuration and applicable common BSP patches. It is **not** the Armbian/Rockchip vendor 6.1 kernel. No third-party Rocket performance/correctness patch series has been added to this target as of this report.
+
+Device tree:
+
+```text
+rockchip/rk3588s-orangepi-5.dtb
+```
+
+This is for the **original Orange Pi 5 / RK3588S**, not the Orange Pi 5 Plus. The upstream board tree used here enables the GPU, all three NPU cores, their IOMMUs, and the NPU supply relationships. Relevant NPU platform devices are based at:
+
+```text
+fdab0000.npu
+fdac0000.npu
+fdad0000.npu
+```
+
+Three enabled hardware cores do not imply three independent `/dev/accel` devices. The driver presents an accelerator interface and schedules work across its cores.
+
+### 3.2 Key kernel configuration
+
+```config
+# Accelerator infrastructure and upstream NPU
+CONFIG_DRM=y
+CONFIG_DRM_ACCEL=y
+CONFIG_DRM_ACCEL_ROCKET=m
+CONFIG_IOMMU_SUPPORT=y
+CONFIG_ROCKCHIP_IOMMU=y
+
+# Mali-G610 GPU
+CONFIG_DRM_PANTHOR=m
+CONFIG_FW_LOADER=y
+
+# DMA-buffer infrastructure
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+CONFIG_DMABUF_HEAPS_CMA=y
+CONFIG_CMA=y
+
+# Vision capture and decoder driver
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_MEDIA_USB_SUPPORT=y
+CONFIG_VIDEO_DEV=y
+CONFIG_USB_VIDEO_CLASS=m
+CONFIG_VIDEO_ROCKCHIP_VDEC=m
+```
+
+The mainline NPU interface does not require the vendor `CONFIG_ROCKCHIP_RKNPU*` symbols. DMA heaps being enabled also does not mean an application must allocate through them: `rocket-userspace` uses Rocket's buffer-object API.
+
+The target additionally configures CPU frequency control, thermal monitoring, regulators, Ethernet, USB, NVMe/storage, cgroups, namespaces, and container networking. The CPU is four Cortex-A76 plus four Cortex-A55 cores. Installed RAM varies by board; the workload must record the actual memory capacity and container limit.
+
+
+### 3.3 Module and firmware lifecycle
+
+Admiral's tiny-init mounts verified module and firmware squashfs layers before handing over to the normal supervisor. The board's late-load hook requests:
+
+```text
+panthor
+rocket
+uvcvideo
+rockchip-vdec
+```
+
+Panthor requires Mali CSF firmware supplied by the host's `linux-firmware` package:
+
+```text
+arm/mali/arch*/mali_csffw.bin
+```
+
+This firmware belongs to the **GPU**, not the NPU. The Rocket NPU userspace path generates register-command buffers and submits them to the kernel; it is not made functional by installing the Mali firmware or proprietary RKNN libraries.
+
+The host enforces signed modules and kernel lockdown, including:
+
+```config
+CONFIG_MODULE_SIG=y
+CONFIG_MODULE_SIG_ALL=y
+CONFIG_MODULE_SIG_FORCE=y
+CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y
+```
+
+Modules are configured for Zstd compression; host kmod support is included. Any patched Rocket module must be built against the deployed kernel and signed through Admiral's build pipeline. Container deployment should not install an unrelated `rocket.ko` into the host.
+
+### 3.4 Boot and storage
+
+- U-Boot 2025.10, `orangepi-5-rk3588s_defconfig`.
+- Existing RK3588 DDR initialization and BL31 blobs remain part of boot; mainline Linux does not eliminate those boot firmware components.
+- GPT: `idbloader.img` at 32 KiB, `u-boot.itb` at 8 MiB.
+- Two 600 MiB A/B boot slots, starting at 16 MiB, followed by Admiral data/main partitions.
+- Redundant U-Boot environments at `0x400000` and `0x408000`.
+- Serial console: `ttyS2`, 1500000 baud.
+- SD is the initial bring-up medium. The original-board upstream DT leaves eMMC disabled; NVMe is available as storage, not a standalone BootROM boot medium.
+
+Models, camera frames, caches, and inference output should be held in workload data volumes, not baked into the verified host root filesystem or boot slots.
+
+### 3.5 BSP build entry points
+
+From the `admiral-bsp` root:
+
+```bash
+make orangepi-5-mainline-config
+make orangepi-5-mainline
+
+# Regenerate after editing fragments:
+make orangepi-5-mainline-reconfig
+```
+
+The intended image output is:
+
+```text
+output/orangepi-5-mainline/images/admiral-orangepi-5-mainline.img
+```
+
+Configuration generation has been run; the full image build command above has not. The target currently includes the repository's `local-init` development feature, so the BSP build also needs its expected local ARM64 Admiral init artifact under `prebuilt/admiral-init/`, as for the existing board target. Record the deployed init artifact alongside the image identity.
+
+## 4. Host/container division of responsibility
+
+| Component | Admiral BSP / host | Workload container |
+| --- | --- | --- |
+| Linux, DTB, U-Boot, A/B state | Owns and builds | Uses the running host |
+| Rocket/Panthor/UVC kernel modules | Builds, signs, loads | Opens exposed device nodes |
+| Mali GPU firmware | Installs in verified firmware layer | Does not supply host firmware |
+| Rocket NPU UAPI header | Exports from the exact kernel build for development | Uses matching headers when compiling userspace |
+| `rocket-userspace` / `librocketnpu` | Not shipped as inference userspace | Builds and packages |
+| `ggml-rocket` plugin | Not shipped | Builds against its exact llama.cpp ggml |
+| llama.cpp and shared ggml libraries | Not shipped | Builds, packages, runs |
+| GGUF model and projector | Not shipped | Pins, validates, mounts |
+| Camera capture and preprocessing | Supplies kernel interface | Provides V4L2/FFmpeg/GStreamer/OpenCV as required |
+| Mesa PanVK/Vulkan | Supplies Panthor kernel interface | Optional GPU userspace stack |
+| Mesa Rocket/Teflon | Supplies Rocket kernel interface | Separate optional TFLite NPU stack |
+| API service, model routing, health checks | Runs workload through Admiral | Implements application behavior |
+| Accelerator clock/PM policy | Owns validated kernel/board policy | Observes and benchmarks the supplied policy |
+
+The host uses musl. A normal ARM64 glibc application container can use its own userspace libraries; it communicates with the host via the Linux ABI. **Do not bind the host's musl `/usr/lib` over the container's glibc library directories.**
+
+## 5. Do not confuse the available accelerator stacks
+
+| Stack | Userspace API / artifacts | Kernel interface | Relevance |
+| --- | --- | --- | --- |
+| llama.cpp + ggml-rocket | GGUF + matching projector; ggml backend plugin | Mainline Rocket, `/dev/accel/accelN` | Recommended first NPU-assisted VLM candidate |
+| Mesa Rocket + Teflon | TFLite model + `libteflon.so` delegate | Mainline Rocket | Separate inference path for supported TFLite operations/models |
+| llama.cpp + Vulkan | GGUF + projector; Vulkan loader and Mesa PanVK | Panthor, `/dev/dri/renderD*` | GPU acceleration, not NPU acceleration |
+| Rockchip RKNN / RKLLM | `.rknn` / `.rkllm`, vendor runtime libraries | Vendor RKNPU ABI | Not provided by this mainline target |
+
+In particular:
+
+- Installing Mesa is **not required** for the `ggml-rocket` path. Its companion `rocket-userspace` library directly implements userspace NPU programming through Rocket.
+- `libdrm` is a dependency; it is not equivalent to installing all of Mesa.
+- `GGML_VULKAN=ON` does not target the NPU.
+- Vendor `librknnrt` / `librkllmrt` are not replacements for `librocketnpu` and cannot be assumed to work with Rocket's ioctls.
+- Unrestricted device access in a container does not translate one driver's ABI into another.
+
+## 6. How the Rocket NPU interface works
+
+The kernel's public definitions are in:
+
+```text
+include/uapi/drm/rocket_accel.h
+```
+
+The stock 7.2.9 interface includes:
+
+| Interface | Purpose |
+| --- | --- |
+| `DRM_IOCTL_ROCKET_CREATE_BO` | Create a buffer object, obtaining a GEM handle, NPU address, and mmap offset |
+| `DRM_IOCTL_ROCKET_SUBMIT` | Submit jobs and register-command tasks with input/output buffer references |
+| `DRM_IOCTL_ROCKET_PREP_BO` | Wait as needed and perform cache synchronization before CPU access |
+| `DRM_IOCTL_ROCKET_FINI_BO` | Synchronize CPU changes for subsequent NPU access |
+
+The kernel manages storage mappings, scheduling, synchronization, interrupts, and hardware lifecycle. It does not parse GGUF models or decide how a transformer becomes NPU instructions. That is the job of the userspace library/backend.
+
+`rocket-userspace` supplies hardware-specific tensor packing, tiling, command generation, and multicore work submission. `ggml-rocket` maps supported ggml operations onto that library and leaves the rest to other backends, initially CPU.
+
+This split explains why a kernel-only BSP change is necessary but insufficient for useful inference.
+
+## 7. Container-visible devices and discovery
+
+The workload already uses Admiral's unrestricted-hardware execution mode. Its actual filesystem/device view still needs to include the following:
+
+| Path | Need |
+| --- | --- |
+| `/dev/accel/accelN` | Read/write access to the Rocket accelerator node; normally `accel0` on initial boot |
+| `/sys/bus/platform/drivers/rocket/` and its resolved device links | Readable bound-core and device-tree discovery |
+| `/sys/module/rocket/parameters/` where present | Readable capability/tuning discovery for patched drivers |
+| `/sys/devices/system/cpu/` | CPU discovery and frequency/topology information used by affinity helpers |
+| `/proc/meminfo` | Memory accounting used by library residency heuristics |
+| `/proc/device-tree/compatible`, or the corresponding bound-device `of_node` data | SoC identification |
+| `/dev/video*` and any associated `/dev/media*` nodes | Camera capture, when used |
+| `/dev/dri/renderD*` | Optional GPU backend; not the Rocket NPU device |
+
+Read-only sysfs visibility is sufficient for the normal RK3588 discovery paths described here. Kernel/module configuration remains a host responsibility.
+
+The inspected `rocket-userspace` revision opens `/dev/accel/accel0` by default and supports an explicit override:
+
+```bash
+export ROCKET_DEV=/dev/accel/accel0
+```
+
+Use the actual node if numbering differs. The library checks that the device reports driver name `rocket`. A node's number may change after device teardown/rebind; enumerate again and restart the application after such host operations. A shared NPU device node can represent all three cores.
+
+Also check the container's own memory limit. `/proc/meminfo` may describe host memory rather than the workload's effective cgroup budget. Library automatic residency sizing should not be assumed to respect a smaller container limit without testing.
+
+## 8. Candidate source versions and reproducibility
+
+These are **inspected candidate revisions**, not a set already built or validated together on Admiral:
+
+| Project | Candidate revision | Role |
+| --- | --- | --- |
+| Linux | `v7.2.9`, archive hash in section 3 | Host kernel and UAPI baseline |
+| llama.cpp | `b11401`, commit `a7fb71fab83b474a0892b9a05aaa3a8ddca2729b` | Shared ggml host, server, multimodal frontend |
+| ggml-rocket | `550986d2212eb3a6f213a98c6a0dec0a8bf2f43b` | External ggml NPU backend |
+| rocket-userspace | `f86cf52c666b4eddadc17d80d6c558b4067c0d6b` | Userspace NPU library |
+| gregordinary/patches | `7b945e71fd55f888842767623ffb431212ae89c8` | Candidate Rocket patch source; not applied in this BSP |
+
+The backend
+
+
+ documentation reports compatibility testing with llama.cpp versions through `b11401`. Its loader/build still must be checked against the exact selected ggml headers and shared libraries.
+
+For every container/image pair, record:
+
+- BSP revision, final kernel release, kernel/module build identity, DTB identity, and applied Rocket patch IDs.
+- Container image digest and base-image digest.
+- The three userspace commit IDs, compiler version, CMake flags, and Rocket UAPI header hash.
+- Model and projector download identity, architecture, quantization, and SHA-256 hashes.
+- Board RAM, container memory limit, batch/context settings, and measured clock/thermal conditions.
+
+One `libggml-base.so` instance must be shared by llama.cpp and its plugin. Building the plugin against an unrelated standalone ggml checkout can produce an ABI or operation-number mismatch even when the libraries have similar version labels.
+
+## 9. Userspace build recipe
+
+### 9.1 Build prerequisites
+
+Use a Linux **ARM64** build stage or a correctly configured ARM64 cross-toolchain. Building natively inside an ARM64 container is the simplest first qualification path.
+
+Required build components:
+
+- C/C++ compiler with C++20 support; the backend project reports testing GCC 13 and GCC 16.
+- CMake, Make or Ninja, Git, and pkg-config.
+- libdrm development files.
+- OpenSSL development files for the HTTPS-enabled llama.cpp recipe below.
+- Rocket UAPI headers from the selected host kernel build.
+- Standard libc, pthread, math, C++ runtime, and optionally OpenMP development/runtime support selected by the llama.cpp build.
+
+For a Debian-family ARM64 build stage, common package names are:
+
+```bash
+apt-get update
+apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git pkg-config libdrm-dev libssl-dev ca-certificates
+```
+
+Choose a base image whose compiler satisfies C++20. These package names do **not** ensure the distribution's kernel-header package includes the required Rocket header.
+
+### 9.2 Export the correct UAPI headers
+
+The BSP team should export headers from the exact kernel source/patch combination it will ship. Example on a build host with a clean source tree:
+
+```bash
+make -C /path/to/selected-linux-tree ARCH=arm64 \
+    headers_install INSTALL_HDR_PATH=/path/to/kernel-uapi-export
+```
+
+Provide the exported DRM headers to the container build stage. For example, with the export mounted at `/build/kernel-uapi`:
+
+```bash
+test -f /build/kernel-uapi/include/drm/rocket_accel.h
+mkdir -p /usr/local/include
+cp -a /build/kernel-uapi/include/drm /usr/local/include/
+```
+
+The companion `drm.h` must be resolvable as well. Exporting the generated DRM header directory avoids copying just one header with unresolved local includes.
+
+**Do not replace headers inside an unpatched kernel source tree with a newer downstream Rocket header.** Some downstream patches change both the driver and the UAPI structure contract. Keep those changes paired, and let the userspace library probe runtime capabilities rather than forcing unsupported job flags.
+
+### 9.3 Check out and build the pinned application stack
+
+The following is a candidate native ARM64 container recipe. It has been checked against the inspected projects' source interfaces, but has **not been built and run as an Admiral workload**.
+
+```bash
+mkdir -p /work
+cd /work
+
+git clone https://github.com/ggml-org/llama.cpp.git
+git -C llama.cpp checkout --detach a7fb71fab83b474a0892b9a05aaa3a8ddca2729b
+
+git clone https://github.com/gregordinary/rocket-userspace.git
+git -C rocket-userspace checkout --detach f86cf52c666b4eddadc17d80d6c558b4067c0d6b
+
+git clone https://github.com/gregordinary/ggml-rocket.git
+git -C ggml-rocket checkout --detach 550986d2212eb3a6f213a98c6a0dec0a8bf2f43b
+
+cmake -S llama.cpp -B llama.cpp/build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=ON \
+    -DGGML_BACKEND_DL=ON \
+    -DGGML_NATIVE=OFF \
+    -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16 \
+    -DGGML_VULKAN=OFF \
+    -DLLAMA_OPENSSL=ON \
+    -DLLAMA_BUILD_SERVER=ON \
+    -DLLAMA_BUILD_TOOLS=ON \
+    -DLLAMA_BUILD_APP=OFF \
+    -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_UI=OFF \
+    -DLLAMA_USE_PREBUILT_UI=OFF \
+    -DLLAMA_BUILD_TESTS=OFF
+cmake --build llama.cpp/build -j
+
+cmake -S ggml-rocket -B ggml-rocket/build-dl \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_ROCKET_DL=ON \
+    -DGGML_ROCKET_STRICT_ABI=ON \
+    -DHOST_DIR=/work/llama.cpp \
+    -DGGML_LIB_DIR=/work/llama.cpp/build/bin \
+    -DROCKETNPU_DIR=/work/rocket-userspace \
+    -DROCKETNPU_PROVIDER=builtin
+cmake --build ggml-rocket/build-dl -j
+```
+
+The explicit `ROCKETNPU_DIR` ensures this source checkout is used rather than an older `rocketnpu` package installed elsewhere in the build image. The companion library is built as part of the plugin build.
+
+The initial recipe disables Vulkan to make NPU/CPU placement easier to establish, and omits the optional unified application binary, examples, and browser UI. It retains the server and tools. HTTPS support uses `LLAMA_OPENSSL`; the older `LLAMA_CURL` option is deprecated at this pinned revision. The examples use mounted local model files.
+
+For a cross-build, pass the ARM64 toolchain file to **both** CMake configurations and use ARM64 libraries/headers for every target dependency. Do not substitute x86 build-host libraries or `-march=native`. The A76/A55 CPU path must not assume SVE, SME, or i8mm instructions.
+
+### 9.4 Runtime image contents
+
+The runtime image needs:
+
+1. The selected llama.cpp tools, including `llama-server`, and their shared libraries.
+2. Dynamic ggml CPU backend libraries and `libggml-base.so`, `libggml.so`, `libllama.so`, and multimodal libraries emitted by that build.
+3. `libggml-rocket.so`, compiled against those exact libraries.
+4. The container's matching runtime dependencies: libc, libstdc++, libgcc, libdrm, OpenSSL libraries for the shown recipe, and any other libraries found in the actual ELF dependency closure; OpenMP runtime if the build uses it.
+5. The model and matching projector, normally supplied by a data volume.
+6. Camera/preprocessing tools required by the workload, separately from the NPU backend.
+
+The shown plugin build normally statically links `librocketnpu` into the plugin. If packaging changes to shared linkage, ship `librocketnpu.so` and its matching SONAME links too.
+
+A simple bring-up layout preserves the llama.cpp `build/bin` contents:
+
+```text
+/opt/llama/bin/                 # selected executables, their shared libraries/backends
+/opt/rocket/libggml-rocket.so
+/models/model.gguf
+/models/mmproj.gguf
+/data/                         # captured inputs, application data, measurements
+```
+
+Set the executable and library paths, or install an equivalent loader configuration:
+
+```bash
+export PATH=/opt/llama/bin:$PATH
+export LD_LIBRARY_PATH=/opt/llama/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GGML_BACKEND_PATH=/opt/rocket/libggml-rocket.so
+export ROCKET_DEV=/dev/accel/accel0
+```
+
+At the inspected llama.cpp revision, **`GGML_BACKEND_PATH` is a shared-library filename**, not a colon-separated plugin-directory search path. The loader passes its value directly to the backend loader.
+
+Inspect `ldd` or `readelf -d` output in the target environment before reducing the runtime image. Build and runtime stages should use a compatible libc baseline; the host BSP's musl version does not determine the container's glibc requirements.
+
+## 10. Running a vision workload
+
+### 10.1 Select the NPU for both relevant parts of the pipeline
+
+There are two independent questions:
+
+1. Does the language-model scheduler use Rocket for eligible prefill operations?
+2. Does the multimodal vision encoder select Rocket at all?
+
+Loading the plugin alone does not settle the second question. The inspected multimodal implementation's automatic selection checks GPU/IGPU devices; Rocket registers as an accelerator. Explicitly select it with:
+
+```bash
+export MTMD_BACKEND_DEVICE=ROCKET
+```
+
+At llama.cpp `b11401`, the equivalent explicit CLI option is:
+
+```text
+--mmproj-device ROCKET
+```
+
+### 10.2 Initial device and loader check
+
+Run inside the workload container:
+
+```bash
+test -c "$ROCKET_DEV"
+ldd /opt/rocket/libggml-rocket.so
+ROCKET_DEBUG=1 llama-cli --list-devices
+```
+
+Confirm the backend loads and the Rocket device is identified. Device-list formatting may vary by frontend version; use backend startup logs and the standalone tests as well. Enumeration is not proof that a subsequent inference offloads any operations.
+
+### 10.3 Candidate server invocation
+
+Assuming the environment from section 9 and a matching model/projector pair:
+
+```bash
+ROCKET_MM_PROFILE=1 \
+ROCKET_LOG_STDERR=1 \
+llama-server \
+    -m /models/model.gguf \
+    --mmproj /models/mmproj.gguf \
+    --mmproj-device ROCKET \
+    -ngl 0 \
+    -nr \
+    -b 2048 -ub 2048 \
+    -c 4096 \
+    --host 0.0.0.0 --port 8080
+```
+
+Important flags and limits:
+
+- **`-ngl 0`:** disables GPU layer offload. Rocket's accelerator offload is scheduler-driven and can still be active.
+- **`-nr` / `--no-repack`:** disables CPU weight repacking. The backend documentation and code explain that quantized weights in `CPU_REPACK` buffers are otherwise ineligible for its host-buffer NPU path.
+- **`-b` / `-ub`:** large batches help amortize packing/dequantization and dispatch. These are starting values, not a guaranteed memory fit. Reduce and benchmark them for the installed RAM, model, image size, and container budget.
+- **`-c`:** context must hold the prompt, image tokens, and output. Image tiling can make context requirements much larger than a text-only prompt.
+- **`--mmproj-device ROCKET`:** explicitly selects the NPU backend for the encoder/projector path. Do not combine it with `--no-mmproj-offload` for the NPU test.
+- **`ROCKET_MM_PROFILE=1`:** supplies evidence of actual operations/timing on the NPU route. Keep profiling overhead consistent across comparisons.
+- **`ROCKET_LOG_STDERR=1`:** makes library diagnostics visible even if application logging filters some backend messages.
+- Do not set `--no-op-offload` in the NPU arm; it can suppress the accelerator scheduling being tested.
+
+Use the pinned server's image-input API to send images. For example, a client container with Python 3 can send one local JPEG as a data URL:
+
+```python
+import base64
+import json
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+image = base64.b64encode(Path("/data/frame.jpg").read_bytes()).decode("ascii")
+payload = {
+    "messages": [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe the objects and their positions."},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/jpeg;base64," + image
+            }},
+        ],
+    }],
+    "max_tokens": 128,
+    "temperature": 0,
+    "stream": False,
+}
+request = Request(
+    "http://127.0.0.1:8080/v1/chat/completions",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+)
+with urlopen(request, timeout=300) as response:
+    print(response.read().decode("utf-8"))
+```
+
+Adjust the address for separate client/server containers. Python is only needed for this example client, not for the C++ inference server itself.
+
+### 10.4 CPU reference run
+
+For a genuine CPU baseline, remove the external NPU plugin from the load path and disable projector and operation offload. **`-ngl 0` alone is not a CPU-only guarantee when an accelerator backend is loaded.**
+
+```bash
+env -u GGML_BACKEND_PATH -u MTMD_BACKEND_DEVICE \
+    llama-server \
+    -m /models/model.gguf \
+    --mmproj /models/mmproj.gguf \
+    --no-mmproj-offload --no-op-offload \
+    -ngl 0 -b 2048 -ub 2048 -c 4096 \
+    --host 0.0.0.0 --port 8080
+```
+
+This assumes the initial CPU-only build recipe and no other plugin-loading configuration. Leave CPU repacking enabled for the optimized CPU performance baseline; also run a no-repack CPU arm if needed to isolate the cost of that change. Compare the same model files, inputs, context, and batching.
+
+### 10.5 Camera pipeline
+
+The first capture path should be USB UVC. Put `v4l2-ctl` and the chosen FFmpeg/GStreamer/OpenCV pipeline in the workload image. Inspect the actual camera's supported formats, resolutions, and frame rates before selecting capture arguments.
+
+Start with one saved image before adding a live stream. Then add capture timestamps, frame sampling, resize/crop policy, bounded queues, and a policy for dropping stale frames. A VLM that can answer one image is not necessarily capable of processing every frame from a 30 FPS camera.
+
+MIPI CSI sensors require separate DT graphs and capture/ISP qualification. The presence of `rockchip-vdec` in the module set does not enable disabled decoder DT nodes or provide vendor MPP/RGA/ISP userspace interfaces.
+
+## 11. Expected acceleration and model compatibility
+
+### 11.1 Documented ggml-rocket execution behavior
+
+The third-party backend describes acceleration of suitable static-weight `MUL_MAT` operations, selected prefill attention, and certain mixture-of-experts operations. Eligibility depends on datatype, tensor layout, shape, memory, and runtime settings. Unsupported operations run on CPU.
+
+For the documented SmolVLM2-2.2B case:
+
+- The pipeline combines a SigLIP-SO400M vision encoder with a language model.
+- Supported vision projections and feed-forward matrix operations can offload.
+- Some feed-forward operations have incompatible alignment; normalization, activation, and other encoder operations remain on CPU in the documented path.
+- The author reports approximately **1.19x warm image-encoder speedup** with projected embedding cosine similarity approximately **0.99998** relative to CPU under the author's test conditions.
+- Language prefill may see a different, larger speedup. This must not be presented as the image-encoder or whole-application speedup.
+- Token-by-token generation remains on CPU in this backend's documented RK3588 strategy.
+
+These are **project-reported results, not Admiral measurements**. Their configuration includes downstream driver changes discussed below. No absolute throughput or real-time claim should be attached to this BSP until measured on the intended board.
+
+### 11.2 Model acceptance rules
+
+For each model candidate, establish all of the following:
+
+1. The pinned llama.cpp supports the language and vision architectures.
+2. The model and projector come from the same compatible conversion/checkpoint pair.
+3. The selected quantization and image preprocessing preserve task accuracy.
+4. Actual backend placement shows useful NPU work on that graph.
+5. Total memory fits weights, projector, KV cache, temporary tensors, NPU buffers, camera buffers, and the rest of the workload.
+6. End-to-end latency is better than an appropriately optimized CPU baseline or the available GPU path.
+
+GGUF quantization such as `Q4_K_M` describes stored model weights; it does not imply the NPU executes those operations in native 4-bit form. The backend's normal quantized route can dequantize weights to FP16 for NPU work, adding CPU time and temporary/resident memory costs.
+
+Custom vision encoders, JEPA-style models, or other new architectures are not enabled merely by using the same NPU. They need a compatible frontend and graph/operator implementation. `librocketnpu` can be a building block for a custom application, but that is separate model integration work.
+
+## 12. Stock Rocket versus the downstream patch series
+
+### 12.1 Current Admiral target
+
+The target currently selects the **upstream Rocket driver from Linux 7.2.9**. The third-party Rocket patch series is not applied. Therefore do not assume the target has any of its added module parameters, job flags, scheduling improvements, or performance characteristics.
+
+### 12.2 What the third-party stack says it needs
+
+The `rocket-userspace` documentation says its basic path builds and runs with stock Rocket, probing capabilities and disabling unsupported chaining features. Its published performance configurations use a downstream series covering:
+
+- NPU compute-clock policy and shared-clock/runtime-PM coordination.
+- Buffer lifetime and submission-error-path corrections.
+- Clock lookup, interrupt/reset ordering, and hardware-core identification corrections.
+- Reduced IOMMU attach/detach overhead.
+- Extensible UAPI structures and batched submission.
+- Additional completion and suspend behavior for particular operations.
+
+Its documentation describes stock operation at a 200 MHz compute-clock setting and performance tests at 600 MHz with its clock patch. **Those are the project's described conditions, not clock measurements from an Admiral Orange Pi 5.** They do not justify multiplying application speed by the clock ratio or quoting the advertised NPU TOPS as achieved model throughput.
+
+Some project summaries call the patches optional, while the detailed patch README recommends its full series and distinguishes correctness changes from tuning. Treat the series as a candidate source to review and qualify. Check whether a fix is already in the selected stable kernel, preserve patch dependencies, and do not blindly apply a moving `main` branch. The patch README contains results from different revisions; some described fixes have build-only rather than hardware validation.
+
+### 12.3 Required integration work if adopting patches
+
+**BSP team:**
+
+1. Review and pin the Rocket-specific patch set against Linux 7.2.9. Avoid importing unrelated media/crypto patches just because they share a manifest repository.
+2. Build the kernel and Rocket module with the matching UAPI definitions, using Admiral's signing keys and normal verified-module delivery.
+3. Export the resulting UAPI headers to the container build pipeline.
+4. Validate all three cores, repeated jobs, process exit/restart, failure reporting, power transitions, and sustained workload behavior on the actual Orange Pi 5.
+5. Select and document a measured operating point and thermal/power policy for this board.
+
+**Workload team:**
+
+1. Build the pinned userspace against the supplied UAPI.
+2. Keep capability probing enabled; do not force a job-layout feature on an unsupported kernel.
+3. Re-run primitive and model correctness tests against the resulting host/container pair.
+4. Publish end-to-end measurements and the exact version/parameter tuple.
+
+`rocket_npu_clk_hz=600000000` is a downstream example parameter, **not a stock-driver command to use on the current image**. If adopted, configure it through the BSP's module policy after board validation. Increasing clocks from an arbitrary container shell is not the application integration strategy.
+
+A downstream-patched Rocket module remains a **mainline-based Rocket stack**; it is not the vendor RKNPU ABI. An out-of-tree *ggml plugin* and an out-of-tree *kernel module/patch* are also different things: the former lives in the container, the latter belongs to the host build.
+
+## 13. Bring-up and workload acceptance plan
+
+### Phase A — host readiness
+
+The BSP team supplies the built image and collects:
+
+```bash
+uname -a
+cat /proc/device-tree/model
+lsmod
+ls -l /dev/accel/ /dev/dri/
+ls -l /sys/bus/platform/drivers/rocket/
+dmesg | grep -Ei 'rocket|npu|iommu|panthor|firmware'
+modinfo rocket
+```
+
+Check actual driver binding, expected core discovery, module signature acceptance, and absence of repeated NPU/MMU errors. Record driver interface version as reported by the userspace library; it is separate from the kernel release and module build identity.
+
+### Phase B — userspace primitive correctness
+
+Build a separate `rocket-userspace` test tree against the same header set:
+
+```bash
+cmake -S /work/rocket-userspace -B /work/rocket-userspace/build-tests \
+    -DCMAKE_BUILD_TYPE=Release -DROCKETNPU_BUILD_TESTS=ON
+cmake --build /work/rocket-userspace/build-tests -j
+ctest --test-dir /work/rocket-userspace/build-tests --output-on-failure
+```
+
+Build the standalone ggml backend gates against the same llama.cpp ggml source:
+
+```bash
+cmake -S /work/ggml-rocket -B /work/ggml-rocket/build-tests \
+    -DGGML_DIR=/work/llama.cpp/ggml \
+    -DROCKETNPU_DIR=/work/rocket-userspace \
+    -DGGML_ROCKET_STRICT_ABI=ON \
+    -DGGML_NATIVE=OFF \
+    -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
+cmake --build /work/ggml-rocket/build-tests -j
+ctest --test-dir /work/ggml-rocket/build-tests --output-on-failure
+```
+
+Run these gates on the actual board. **A green test invocation with NPU tests skipped is not an NPU pass.** Record pass/fail/skip counts and reasons, and inspect execution-route counters.
+
+Admiral uses s6 rather than systemd. The inspected userspace test suite includes a kernel-log fixture using journal access; it can skip that check without a readable journal. Capture host `dmesg`/kernel logs independently during tests and account for this explicitly.
+
+### Phase C — model correctness and actual offload
+
+- Run identical saved images/prompts on CPU and NPU-assisted paths.
+- Confirm vision encoder selection reports Rocket and the NPU profiling path records real operations.
+- Compare projected embeddings where practical, model outputs, and a task-relevant labeled evaluation set.
+- Test image sizes/tiling, context lengths, and quantizations used by the application.
+- Verify that a missing backend/device fails visibly in the workload health/reporting path rather than being reported as successful NPU service.
+
+### Phase D — performance and reliability
+
+Report the components separately:
+
+| Metric | Why |
+| --- | --- |
+| Capture/preprocessing latency | Can dominate the live-camera path independently of inference |
+| Image-encoder latency | Measures the actual vision acceleration |
+| Language prefill throughput | Measures prompt/image-token processing |
+| Time to first token | User-visible initial response delay |
+| Generation tokens/second | Often CPU/memory-bound in this backend |
+| End-to-end latency and useful frames/second | Determines whether the workload meets its real objective |
+| Peak memory / cgroup pressure | Includes KV, projector, device buffers, and capture queues |
+| Sustained temperature, clocks, and power | Establishes repeatable operation beyond a short warm benchmark |
+| Errors, timeouts, restarts, and recovery | Important for continuous Admiral workloads |
+
+Measure cold startup and warm steady state separately. Compare repeated runs, retain CPU repacking in the optimized CPU baseline, and test the intended concurrency. A single warm matrix benchmark does not establish sustained camera-to-answer throughput.
+
+## 14. Troubleshooting guide
+
+| Symptom | Likely checks |
+| --- | --- |
+| No `/dev/accel` on host | Rocket configuration/module, signature acceptance, DT core/IOMMU/regulator enablement, probe logs |
+| Node exists on host but not in container | Actual device mounts, node identity, permissions and workload device policy |
+| Build cannot find `drm/rocket_accel.h` | Install exported DRM UAPI headers from the selected kernel; libdrm-dev alone may be insufficient |
+| Plugin fails with missing library or GLIBC version | Match build/runtime libc; inspect plugin and ggml ELF dependencies; preserve shared-library links |
+| Backend API or operation-number mismatch | Rebuild plugin against the exact llama.cpp bundled ggml and matching `libggml-base.so` |
+| Rocket device loads but quantized prefill stays on CPU | `-nr`, host-buffer eligibility, batch size, graph shapes, and operation-offload settings |
+| Text prefill offloads but image encoder stays on CPU | Set `--mmproj-device ROCKET` or `MTMD_BACKEND_DEVICE=ROCKET`; check matching projector and logs |
+| NPU graph runs but generation speed is unchanged | Expected if token decode remains CPU-bound; inspect image encode/prefill/first-token time separately |
+| `SUBMIT` returns `EINVAL` or capabilities disagree | Kernel/UAPI/userspace pairing, supported flags, actual loaded driver version, partial patch application |
+| Performance below project tables | Stock versus patched driver, clock/PM behavior, model/quant/batch differences, memory, CPU baseline and thermals |
+| Tests pass with many skips | Check that the NPU was actually opened, `ROCKET_DEV` is correct, and skipped tests are expected for RK3588 |
+| Device number changes after host rebind | Enumerate again, update `ROCKET_DEV`, restart the process; capability/discovery state can be cached |
+| Camera exists but no frames | Camera format negotiation, V4L2 permissions, USB path, and the chosen capture pipeline |
+
+## 15. Team deliverables and next milestone
+
+### BSP team deliverables
+
+- A boot-tested `orangepi-5-mainline` image with recorded kernel/DTB/module identity.
+- Verified Rocket core/device enumeration and UVC camera access.
+- A named stock or patched Rocket configuration, including actual clock/PM policy.
+- Exported matching UAPI headers and a complete patch manifest if patches are adopted.
+- Host logs from primitive and sustained workload tests.
+
+### Workload team deliverables
+
+- A reproducible ARM64 container with pinned llama.cpp, ggml-rocket, and rocket-userspace.
+- Packaged dynamic backend/runtime dependencies and explicit vision-device selection.
+- Model/projector provenance, hashes, RAM requirements, and a bounded camera pipeline.
+- CPU reference and NPU-assisted correctness results.
+- Actual-offload evidence, separated encoder/prefill/decode timings, and end-to-end measurements.
+- Health reporting that states which backend is active and distinguishes missing acceleration from healthy NPU operation.
+
+**First acceptance milestone:** one physical Orange Pi 5 running the Admiral image, with an Admiral container answering questions about a saved image using a verified GGUF/projector pair, and logs proving both supported vision operations and language prefill operations execute through Rocket. Live camera streaming and broader model coverage follow that result.
+
+## 16. References and source notes
+
+### BSP files
+
+Paths below are relative to the `admiral-bsp` repository root:
+
+- `targets.mk`
+- `board/admiral/boards/orangepi-5-mainline/fragments/10-kernel.config`
+- `board/admiral/boards/orangepi-5-mainline/fragments/20-uboot.config`
+- `board/admiral/boards/orangepi-5-mainline/kernel/required-builtin.list`
+- `board/admiral/boards/orangepi-5-mainline/rootfs_overlay/etc/board-profile.conf`
+- `board/admiral/boards/orangepi-5-mainline/board.env`
+- `board/admiral/soc/rockchip/rk3588-mainline/kernel/{base,compute,network,storage}.config`
+- `board/admiral/soc/rockchip/rk3588-mainline/fragments/10-firmware.config`
+- `board/admiral/common/kernel/{enable_initram,hardening}.config`
+
+The initial board README predates the discovery of the direct ggml-rocket integration and describes the NPU userspace path primarily through Mesa/Teflon. This report adds the third-party ggml route; it does not imply that route has been installed into the BSP or qualified on hardware.
+
+### Primary references
+
+1. [Kernel.org release information](https://www.kernel.org/releases.json) and [Linux 7.x archive hashes](https://cdn.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc).
+2. [Linux Rocket driver documentation](https://docs.kernel.org/accel/rocket/index.html).
+3. [Linux v7.2 Rocket UAPI](https://github.com/torvalds/linux/blob/v7.2/include/uapi/drm/rocket_accel.h); the 7.2.9 archive was also inspected locally.
+4. [ggml-rocket README at the inspected revision](https://github.com/gregordinary/ggml-rocket/blob/550986d2212eb3a6f213a98c6a0dec0a8bf2f43b/README.md).
+5. [ggml-rocket API, model results, and tuning](https://github.com/gregordinary/ggml-rocket/blob/550986d2212eb3a6f213a98c6a0dec0a8bf2f43b/API.md).
+6. [rocket-userspace README at the inspected revision](https://github.com/gregordinary/rocket-userspace/blob/f86cf52c666b4eddadc17d80d6c558b4067c0d6b/README.md).
+7. [Candidate Rocket patch-series documentation](https://github.com/gregordinary/patches/blob/7b945e71fd55f888842767623ffb431212ae89c8/rocket/README.md).
+8. [llama.cpp b11401 argument handling](https://github.com/ggml-org/llama.cpp/blob/a7fb71fab83b474a0892b9a05aaa3a8ddca2729b/common/arg.cpp): inspected `--mmproj-device`, `MTMD_BACKEND_DEVICE`, and `--no-repack` definitions.
+9. [llama.cpp b11401 backend loading](https://github.com/ggml-org/llama.cpp/blob/a7fb71fab83b474a0892b9a05aaa3a8ddca2729b/ggml/src/ggml-backend-reg.cpp): inspected `GGML_BACKEND_PATH` loading behavior.
+10. [Mesa Panfrost/PanVK documentation](https://docs.mesa3d.org/drivers/panfrost.html) and [Mesa Teflon](https://docs.mesa3d.org/teflon.html).
+11. [Rockchip RKNN Toolkit2](https://github.com/airockchip/rknn-toolkit2) and [RKLLM multimodal example](https://github.com/airockchip/rknn-llm/tree/main/examples/multimodal_model_demo), for comparison with the different vendor ABI/runtime route.
+
+**Evidence rule for this handoff:** statements about BSP configuration and completed compilation checks describe work performed here; performance and broader model-support claims attributed to third-party projects remain claims to reproduce on Admiral's actual host/container/board combination.
+qd@buildserv:~$

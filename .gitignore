@@ -1,0 +1,7 @@
+kernel-uapi/
+models/
+data/
+artifacts/
+output/
+__pycache__/
+*.pyc

@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE=ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78
+FROM ${BASE_IMAGE} AS export
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils make gcc libc6-dev python3 rsync \
+    && rm -rf /var/lib/apt/lists/*
+COPY config/sources.env /work/sources.env
+WORKDIR /work
+RUN . ./sources.env && curl -fSL --retry 3 \
+      "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${LINUX_VERSION}.tar.xz" -o linux.tar.xz \
+    && echo "${LINUX_SHA256}  linux.tar.xz" | sha256sum -c - \
+    && tar -xf linux.tar.xz \
+    && make -C "linux-${LINUX_VERSION}" ARCH=arm64 headers_install INSTALL_HDR_PATH=/all-uapi \
+    && mkdir -p /export/include && cp -a /all-uapi/include/drm /export/include/ \
+    && test -s /export/include/drm/rocket_accel.h \
+    && printf '{"source":"upstream-stock","linux_version":"%s","archive_sha256":"%s","patches":[]}\n' \
+       "$LINUX_VERSION" "$LINUX_SHA256" > /export/identity.json \
+    && cd /export && find include -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+FROM scratch
+COPY --from=export /export/ /

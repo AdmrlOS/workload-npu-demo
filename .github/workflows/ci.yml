@@ -1,0 +1,26 @@
+name: Validate ARM64 workload
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  workload:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runtime and client tests
+        run: python3 -m unittest discover -s tests -v
+      - uses: docker/setup-buildx-action@v3
+      - name: Export stock UAPI
+        run: scripts/prepare-uapi.sh
+      - name: Build runtime
+        run: docker buildx build --platform linux/arm64 --load -t npu-demo:ci .
+      - name: Check runtime packaging and absent-NPU failure
+        run: bash tests/smoke-image.sh npu-demo:ci
+      - name: Compile hardware qualification image
+        run: docker buildx build --platform linux/arm64 --target validation --load -t npu-demo:validation .
+      - name: Portable placement gate
+        run: docker run --rm --entrypoint ctest npu-demo:validation --test-dir /opt/validation/ggml -R '^test-rocket-placement$' --output-on-failure
+      # Hardware inference is accepted on the real Admiral host, not on this runner.

@@ -1,0 +1,17 @@
+{
+  "name": "SmolVLM-256M-Instruct Q8_0 with FP16 projector",
+  "architecture": "smolvlm",
+  "license": "Apache-2.0",
+  "qualification": "CPU vision smoke candidate; RK3588 NPU offload and accuracy require qualification",
+  "repository_revision": "b9e4379657e1450d04d02eec8e345667265b0a00",
+  "model": {
+    "path": "/models/model.gguf",
+    "sha256": "2a31195d3769c0b0fd0a4906201666108834848db768af11de1d2cef7cd35e65",
+    "source": "https://huggingface.co/ggml-org/SmolVLM-256M-Instruct-GGUF/resolve/b9e4379657e1450d04d02eec8e345667265b0a00/SmolVLM-256M-Instruct-Q8_0.gguf"
+  },
+  "projector": {
+    "path": "/models/mmproj.gguf",
+    "sha256": "0802360aca1748f112ea510b8ff277c65b1361c8ef30ed89b83c9c7a60d08e96",
+    "source": "https://huggingface.co/ggml-org/SmolVLM-256M-Instruct-GGUF/resolve/b9e4379657e1450d04d02eec8e345667265b0a00/mmproj-SmolVLM-256M-Instruct-f16.gguf"
+  }
+}

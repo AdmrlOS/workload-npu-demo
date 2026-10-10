@@ -1,0 +1,24 @@
+# Illustrative Admiral dashboard fields, not an API request or import format.
+# Enter these values in Configs > New Configuration; this pins the manually published initial image.
+name: npu-demo
+image: ghcr.io/admrlos/workload-npu-demo@sha256:2a562d5590266e7c276a5b9c7d6757506da67d3cf703f5e24621a64492abb575
+desiredState: RUNNING
+# Leave the dashboard's Command field empty to use the image's entrypoint.
+command: []
+environment:
+  NPU_MODEL_MANIFEST: /models/model.json
+  NPU_MODE: rocket
+options:
+  interactive: false
+  isolateDevices: false
+  hostNetwork: false
+  readOnlyRoot: false
+volumes:
+  - name: npu-models
+    mountPath: /models
+  - name: npu-data
+    mountPath: /data
+ports:
+  - containerPort: 8080
+    hostPort: 8080
+    protocol: TCP
